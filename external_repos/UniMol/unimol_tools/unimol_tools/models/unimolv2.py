@@ -62,6 +62,7 @@ class UniMolV2Model(nn.Module):
         self.output_dim = output_dim
         self.model_size = model_size
         self.remove_hs = params.get('remove_hs', False)
+        self.dictionary = None
 
         name = model_size
         if not os.path.exists(
@@ -204,6 +205,7 @@ class UniMolV2Model(nn.Module):
         attn_bias,
         src_tokens,
         src_coord,
+        layer_idx,
         return_repr=False,
         return_atomic_reprs=False,
         **kwargs
@@ -240,19 +242,21 @@ class UniMolV2Model(nn.Module):
 
         pair_mask = atom_mask_cls.unsqueeze(-1) * atom_mask_cls.unsqueeze(-2)
 
-        def one_block(x, pos, return_x=False):
+        def one_block(x, pos, layer_idx, return_x=False):
             delta_pos = pos.unsqueeze(1) - pos.unsqueeze(2)
             dist = delta_pos.norm(dim=-1)
             attn_bias_3d = self.se3_invariant_kernel(dist.detach(), pair_type)
             new_attn_bias = attn_bias.clone()
             new_attn_bias[:, 1:, 1:, :] = new_attn_bias[:, 1:, 1:, :] + attn_bias_3d
             new_attn_bias = new_attn_bias.type(dtype)
+
             x, pair, layer_outputs = self.encoder(
                 x,
                 new_attn_bias,
                 atom_mask=atom_mask_cls,
                 pair_mask=pair_mask,
                 attn_mask=attn_mask,
+                layer_idx=layer_idx
             )
             node_output = self.movement_pred_head(
                 x[:, 1:, :],
@@ -265,7 +269,7 @@ class UniMolV2Model(nn.Module):
             else:
                 return pos + node_output
 
-        x, pair, pos, intermediate_reprs = one_block(x, pos, return_x=True)
+        x, pair, pos, intermediate_reprs = one_block(x, pos, layer_idx, return_x=True)
         cls_repr = x[:, 0, :]  # CLS token repr
         all_repr = x[:, :, :]  # all token repr
 
@@ -301,7 +305,7 @@ class UniMolV2Model(nn.Module):
                 }
             else:
                 return {'cls_repr': cls_repr,
-                       'intermediate_layer_reprs': intermediate_reprs,
+                        'intermediate_layer_reprs': intermediate_reprs,
                    }
 
         logits = self.classification_head(cls_repr)

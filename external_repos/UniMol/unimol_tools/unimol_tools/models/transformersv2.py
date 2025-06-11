@@ -749,6 +749,7 @@ class TransformerEncoderWithPairV2(nn.Module):
         atom_mask,
         pair_mask,
         attn_mask=None,
+        layer_idx=0,
     ) -> None:
 
         x = self.layer_norm(x)
@@ -758,8 +759,9 @@ class TransformerEncoderWithPairV2(nn.Module):
         eps = 1e-3
         op_norm = 1.0 / (eps + torch.einsum("...bc,...dc->...bdc", op_mask, op_mask))
         layer_outputs = []
-        for layer in self.layers:
-            x, pair = layer(
+        for i in range(layer_idx+1): #range(len(self.layers)):
+            layer_module = self.layers[i]
+            x, pair = layer_module(
                 x,
                 pair,
                 pair_mask=pair_mask,

@@ -9,6 +9,7 @@ import warnings
 
 import numpy as np
 from rdkit import Chem, RDLogger
+from rdkit.Chem import rdchem
 from rdkit.Chem import AllChem
 from scipy.spatial import distance_matrix
 
@@ -511,39 +512,97 @@ def create_mol_from_atoms_and_coords(atoms, coordinates):
     return mol
 
 
-def mol2unimolv2(mol, max_atoms=1024, remove_hs=True, **params):
+# def mol2unimolv2(mol, max_atoms=1024, remove_hs=True, **params):
+#     """
+#     Converts atom symbols and coordinates into a unified molecular representation.
+
+#     :param mol: (rdkit.Chem.Mol) The molecule object containing atom symbols and coordinates.
+#     :param max_atoms: (int) The maximum number of atoms to consider for the molecule.
+#     :param remove_hs: (bool) Whether to remove hydrogen atoms from the representation. This must be True for UniMolV2.
+#     :param params: Additional parameters.
+
+#     :return: A batched data containing the molecular representation.
+#     """
+
+#     mol = AllChem.RemoveAllHs(mol)
+#     atoms = np.array([atom.GetSymbol() for atom in mol.GetAtoms()])
+#     coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+
+#     # cropping atoms and coordinates
+#     if len(atoms) > max_atoms:
+#         mask = np.zeros(len(atoms), dtype=bool)
+#         mask[:max_atoms] = True
+#         np.random.shuffle(mask)  # shuffle the mask
+#         atoms = atoms[mask]
+#         coordinates = coordinates[mask]
+#     else:
+#         mask = np.ones(len(atoms), dtype=bool)
+#     # tokens padding
+#     src_tokens = [AllChem.GetPeriodicTable().GetAtomicNumber(item) for item in atoms]
+#     src_coord = coordinates
+#     #
+#     node_attr, edge_index, edge_attr = get_graph(mol)
+#     feat = get_graph_features(edge_attr, edge_index, node_attr, drop_feat=0, mask=mask)
+#     feat['src_tokens'] = src_tokens
+#     feat['src_coord'] = src_coord
+#     return feat
+
+def mol2unimolv2(symbols: list[str],
+                 coords: np.ndarray,
+                 max_atoms: int = 1024,
+                 **params) -> dict:
     """
-    Converts atom symbols and coordinates into a unified molecular representation.
+    Converts a list of atom symbols and their 3D coordinates into a unified
+    molecular representation (for UniMolV2). Relies on get_graph(symbols, coords)
+    to build node_attr, edge_index, and edge_attr.
 
-    :param mol: (rdkit.Chem.Mol) The molecule object containing atom symbols and coordinates.
-    :param max_atoms: (int) The maximum number of atoms to consider for the molecule.
-    :param remove_hs: (bool) Whether to remove hydrogen atoms from the representation. This must be True for UniMolV2.
-    :param params: Additional parameters.
+    :param symbols:   List of length N, each entry a string like "C", "O", "H", …
+    :param coords:    NumPy array of shape [N, 3] (float32), the 3D coordinates.
+    :param max_atoms: Maximum number of atoms to keep (if N > max_atoms, randomly crop).
+    :param params:    Additional parameters (ignored here).
 
-    :return: A batched data containing the molecular representation.
+    :return: A dict containing:
+             - all keys returned by get_graph_features(
+                   edge_attr, edge_index, node_attr, drop_feat=0, mask=mask
+               )
+             - 'src_tokens': length-N array of atomic numbers
+             - 'src_coord':  shape [N, 3] array of coordinates
     """
 
-    mol = AllChem.RemoveAllHs(mol)
-    atoms = np.array([atom.GetSymbol() for atom in mol.GetAtoms()])
-    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+    N = len(symbols)
+    assert coords.shape == (N, 3), "coords must have shape [N, 3]"
 
-    # cropping atoms and coordinates
-    if len(atoms) > max_atoms:
-        mask = np.zeros(len(atoms), dtype=bool)
+    # 1) Possibly crop to max_atoms
+    if N > max_atoms:
+        mask = np.zeros(N, dtype=bool)
         mask[:max_atoms] = True
-        np.random.shuffle(mask)  # shuffle the mask
-        atoms = atoms[mask]
-        coordinates = coordinates[mask]
+        np.random.shuffle(mask)
+        symbols = np.array(symbols)[mask].tolist()
+        coords = coords[mask]
     else:
-        mask = np.ones(len(atoms), dtype=bool)
-    # tokens padding
-    src_tokens = [AllChem.GetPeriodicTable().GetAtomicNumber(item) for item in atoms]
-    src_coord = coordinates
-    #
-    node_attr, edge_index, edge_attr = get_graph(mol)
-    feat = get_graph_features(edge_attr, edge_index, node_attr, drop_feat=0, mask=mask)
-    feat['src_tokens'] = src_tokens
-    feat['src_coord'] = src_coord
+        mask = np.ones(N, dtype=bool)
+
+    # 2) Build src_tokens = atomic numbers
+    pt = AllChem.GetPeriodicTable()
+    src_tokens = [pt.GetAtomicNumber(sym) for sym in symbols]
+    src_coord = coords  # shape [N, 3]
+
+    # 3) Build graph (node_attr, edge_index, edge_attr) from (symbols, coords)
+    node_attr, edge_index, edge_attr = get_graph(symbols, coords)
+
+    # 4) Get additional graph features, passing the same mask
+    feat = get_graph_features(
+        edge_attr=edge_attr,
+        edge_index=edge_index,
+        node_attr=node_attr,
+        drop_feat=0,
+        mask=mask
+    )
+
+    # 5) Insert src_tokens and src_coord into the returned feature dict
+    feat["src_tokens"] = np.array(src_tokens, dtype=np.int64)  # shape [N]
+    feat["src_coord"] = src_coord                            # shape [N, 3]
+
     return feat
 
 
@@ -601,39 +660,141 @@ def bond_to_feature_vector(bond):
     return bond_feature
 
 
-def get_graph(mol):
-    """
-    Converts SMILES string to graph Data object
-    :input: SMILES string (str)
-    :return: graph object
-    """
-    atom_features_list = []
-    for atom in mol.GetAtoms():
-        atom_features_list.append(atom_to_feature_vector(atom))
-    x = np.array(atom_features_list, dtype=np.int32)
-    # bonds
-    num_bond_features = 3  # bond type, bond stereo, is_conjugated
-    if len(mol.GetBonds()) > 0:  # mol has bonds
-        edges_list = []
-        edge_features_list = []
-        for bond in mol.GetBonds():
-            i = bond.GetBeginAtomIdx()
-            j = bond.GetEndAtomIdx()
-            edge_feature = bond_to_feature_vector(bond)
-            # add edges in both directions
-            edges_list.append((i, j))
-            edge_features_list.append(edge_feature)
-            edges_list.append((j, i))
-            edge_features_list.append(edge_feature)
-        # data.edge_index: Graph connectivity in COO format with shape [2, num_edges]
-        edge_index = np.array(edges_list, dtype=np.int32).T
-        # data.edge_attr: Edge feature matrix with shape [num_edges, num_edge_features]
-        edge_attr = np.array(edge_features_list, dtype=np.int32)
+# def get_graph(mol):
+#     """
+#     Converts SMILES string to graph Data object
+#     :input: SMILES string (str)
+#     :return: graph object
+#     """
+#     atom_features_list = []
+#     for atom in mol.GetAtoms():
+#         atom_features_list.append(atom_to_feature_vector(atom))
+#     x = np.array(atom_features_list, dtype=np.int32)
+#     # bonds
+#     num_bond_features = 3  # bond type, bond stereo, is_conjugated
+#     if len(mol.GetBonds()) > 0:  # mol has bonds
+#         edges_list = []
+#         edge_features_list = []
+#         for bond in mol.GetBonds():
+#             i = bond.GetBeginAtomIdx()
+#             j = bond.GetEndAtomIdx()
+#             edge_feature = bond_to_feature_vector(bond)
+#             # add edges in both directions
+#             edges_list.append((i, j))
+#             edge_features_list.append(edge_feature)
+#             edges_list.append((j, i))
+#             edge_features_list.append(edge_feature)
+#         # data.edge_index: Graph connectivity in COO format with shape [2, num_edges]
+#         edge_index = np.array(edges_list, dtype=np.int32).T
+#         # data.edge_attr: Edge feature matrix with shape [num_edges, num_edge_features]
+#         edge_attr = np.array(edge_features_list, dtype=np.int32)
 
-    else:  # mol has no bonds
+#     else:  # mol has no bonds
+#         edge_index = np.empty((2, 0), dtype=np.int32)
+#         edge_attr = np.empty((0, num_bond_features), dtype=np.int32)
+#     return x, edge_index, edge_attr
+
+
+
+def get_graph(symbols: list[str],
+              coords: np.ndarray,
+              bond_tolerance: float = 1.2) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Builds a graph (node_attr, edge_index, edge_attr) from atomic symbols and 3D coords,
+    but returns node_attr and edge_attr in exactly the same format as the original
+    get_graph(mol) did—so that get_graph_features(...) will accept them without error.
+
+    Steps:
+      1. Build an RDKit RWMol with one Atom per symbol.
+      2. Add a single conformer holding the given 3D coordinates.
+      3. “ConnectTheDots” to guess bonds:
+         For each pair i<j, if 0.4 Å ≤ dist(i,j) ≤ covRad(i)+covRad(j)+0.45 Å, add a single bond.
+      4. Convert the RWMol to an immutable Mol and extract:
+         - node_attr:   an [N, F_node] array via atom_to_feature_vector(atom).
+         - edge_index:  a [2, M] array listing directed edges (both i→j and j→i for each bond).
+         - edge_attr:   an [M, F_edge] array via bond_to_feature_vector(bond).
+
+    Parameters
+    ----------
+    symbols : list of str, length N
+        Atomic symbols, e.g. ["C","O","H", ...].
+    coords : np.ndarray of shape [N, 3]
+        3D coordinates in Ångstroms.
+    bond_tolerance : float, default=1.2
+        (Not used directly—Open Babel’s logic uses a fixed +0.45 Å, but we keep
+        this parameter in case you want to adjust. By default we do: 
+            dist ≤ covRad(i)+covRad(j)+0.45 Å)
+
+    Returns
+    -------
+    node_attr : np.ndarray, shape [N, F_node]
+        The per-atom feature matrix (same format as original get_graph(mol)).
+    edge_index : np.ndarray, shape [2, M]
+        Directed edges. Each undirected bond appears twice.
+    edge_attr : np.ndarray, shape [M, F_edge]
+        The per-edge feature matrix (same format as original get_graph(mol)).
+    """
+    N = len(symbols)
+    assert coords.shape == (N, 3), "coords must have shape [N,3]"
+
+    # 1) Build an editable RDKit molecule
+    rw_mol = Chem.RWMol()
+    for sym in symbols:
+        rw_mol.AddAtom(Chem.Atom(sym))
+
+    # 2) Create and assign one conformer with the given 3D coordinates
+    conf = Chem.Conformer(N)
+    for i in range(N):
+        x_i, y_i, z_i = coords[i]
+        conf.SetAtomPosition(i, (float(x_i), float(y_i), float(z_i)))
+    rw_mol.AddConformer(conf, assignId=True)
+
+    # 3) Guess single bonds via “ConnectTheDots” (Open Babel logic):
+    pt = AllChem.GetPeriodicTable()
+    for i in range(N):
+        Zi = rw_mol.GetAtomWithIdx(i).GetAtomicNum()
+        r_i = pt.GetRcovalent(Zi)
+        for j in range(i + 1, N):
+            Zj = rw_mol.GetAtomWithIdx(j).GetAtomicNum()
+            r_j = pt.GetRcovalent(Zj)
+            dist_ij = np.linalg.norm(coords[i] - coords[j])
+            if 0.4 <= dist_ij <= (r_i + r_j + 0.45):
+                rw_mol.AddBond(i, j, rdchem.BondType.SINGLE)
+
+    # Convert to an immutable Mol
+    rd_mol = rw_mol.GetMol()
+    rd_mol.UpdatePropertyCache(strict=False)
+
+    # 4) Build node_attr by calling atom_to_feature_vector on each Atom
+    atom_features: list[np.ndarray] = []
+    for atom in rd_mol.GetAtoms():
+        fv = atom_to_feature_vector(atom)  # returns a 1D array of length F_node
+        atom_features.append(fv)
+    node_attr = np.stack(atom_features, axis=0)  # shape [N, F_node]
+
+    # 5) Build edges and edge_attr by iterating over Mol's bonds
+    edges: list[tuple[int, int]] = []
+    edge_features: list[np.ndarray] = []
+    for bond in rd_mol.GetBonds():
+        i = bond.GetBeginAtomIdx()
+        j = bond.GetEndAtomIdx()
+        bf = bond_to_feature_vector(bond)  # returns a 1D array of length F_edge
+
+        # add both (i→j) and (j→i)
+        edges.append((i, j))
+        edge_features.append(bf)
+        edges.append((j, i))
+        edge_features.append(bf)
+
+    if edges:
+        edge_index = np.array(edges, dtype=np.int32).T  # shape [2, M]
+        edge_attr = np.stack(edge_features, axis=0)     # shape [M, F_edge]
+    else:
         edge_index = np.empty((2, 0), dtype=np.int32)
-        edge_attr = np.empty((0, num_bond_features), dtype=np.int32)
-    return x, edge_index, edge_attr
+        edge_attr = np.empty((0, atom_features[0].shape[0] if atom_features else 0), dtype=np.int32)
+
+    return node_attr, edge_index, edge_attr
+
 
 
 def get_graph_features(edge_attr, edge_index, node_attr, drop_feat, mask):

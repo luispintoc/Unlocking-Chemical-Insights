@@ -6,7 +6,7 @@
 
 </div>
 
-## This work was accepted as Best Paper at ICML 2025 NewInML workshop 
+## This work was accepted at NeurIPS 2025 AI4Mat workshop & Best Paper at ICML 2025 NewInML workshop 
 Slides and poster: [drive folder](https://drive.google.com/drive/folders/1J4wFHinU_Jdx7Qu7lQMWH-u3dxH1jAwu?usp=drive_link)
 
 </div>

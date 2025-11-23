@@ -1,0 +1,4 @@
+torch>=2.2.0
+transformers==4.57.1
+rdkit==2025.9.1
+PyTDC

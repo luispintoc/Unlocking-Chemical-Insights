@@ -1,5 +1,6 @@
 *.pt
 *.bin
+*.csv
 molnet/*
 
 # Byte-compiled / optimized / DLL files
